@@ -1,0 +1,67 @@
+substitutions:
+    device_name: "rock5b-power-guard"
+    device_name_underscore: "rock5b_power_guard"
+
+packages:
+  device_common: !include .device_common.yaml
+
+deep_sleep:
+  id: deep_sleep_
+  sleep_duration: 120s
+
+esphome:
+  name: ${device_name}
+  platform: ESP8266
+  board: d1_mini
+
+status_led:
+  pin:
+    number: D4
+    inverted: true
+
+switch:
+  - platform: gpio
+    pin: D1
+    id: relay
+    internal: true
+
+binary_sensor:
+  - platform: gpio
+    id: "${device_name_underscore}_external_power"
+    pin: 
+      number: D7
+      inverted: true
+    name: "${device_name} external power"
+    publish_initial_state: true
+    on_state:
+      - script.execute: handle_power_sensor
+
+script:
+  - id: reset_rock5b
+    mode: single
+    then:
+      - switch.turn_on: relay
+      - delay: 1s
+      - switch.turn_off: relay
+  - id: wait_and_sleep
+    mode: single
+    then:
+      - delay: 60s
+      - deep_sleep.enter:
+          id: deep_sleep_
+  - id: handle_power_sensor
+    mode: single
+    then:
+      - lambda: |-
+          auto power_state = id(${device_name_underscore}_external_power).state;
+          if (power_state) {
+            ESP_LOGD("WATCHER", "Power is on");
+            auto reset_reason = system_get_rst_info()->reason;
+            if (reset_reason == 5) {
+              // awaked from deep sleep.
+              id(reset_rock5b).execute();
+            }
+          } else {
+            ESP_LOGD("WATCHER", "Power is off");
+            id(wait_and_sleep).execute();
+          }

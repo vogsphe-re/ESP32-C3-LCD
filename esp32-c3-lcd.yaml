@@ -1,0 +1,244 @@
+substitutions:
+  device_name: ESP32-C3-LCD
+  device_name_underscore: ESP32_C3_LCD
+  vogsphere_pc_mac_addr: !secret vogsphere_pc_mac_addr
+
+globals:
+  - id: is_wifi_connected
+    type: bool
+    initial_value: 'true'
+    restore_value: false
+  - id: ota_progress
+    type: uint8_t
+    initial_value: '0'
+    restore_value: false
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "dNqoI5XjDCRErxXDKSZz8pcMnGlj4359DEC3oLSlgjA="
+
+esphome:
+  name: ${device_name}
+  platform: ESP32
+  board: esp32-c3-devkitm-1
+  includes:
+    - includes/binary_display_buffer.h
+    - includes/graphic_utils.h
+    - ESP32-C3-LCD/WakeOnLan.h
+    - ESP32-C3-LCD/wol.h
+    - ESP32-C3-LCD/clock.h
+
+ota:
+  on_begin:
+    - lambda: |-
+        id(ota_progress) = 0;
+        Clock::stop();
+    - output.set_level:
+        id: gpio_3_backlight_pwm
+        level: 100%
+    - display.page.show: ota_page
+    - component.update: watchface
+  on_progress:
+    - lambda: id(ota_progress) = x;
+    - component.update: watchface
+
+external_components:
+  # - source: github://vogspheremaxim/esphome@pr3625fix
+  #   components: [gc9a01]
+  # - source: github://pr#5941
+  #  components: [cst816]
+  - source: github://pr#6069
+    components: logger
+
+packages:
+  device_common: !include .device_common.yaml
+
+logger:
+  baud_rate: 460800
+  hardware_uart: USB_CDC
+
+spi:
+  mosi_pin: GPIO7
+  clk_pin: GPIO6
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+
+output:
+  - platform: ledc
+    pin: GPIO3
+    id: gpio_3_backlight_pwm
+
+light:
+  - platform: monochromatic
+    output: gpio_3_backlight_pwm
+    name: "Display Backlight"
+    id: backlight
+    restore_mode: ALWAYS_ON
+
+text_sensor:
+  - id: vogsphere_pc_lan_state
+    platform: homeassistant
+    entity_id: device_tracker.vogsphere_l340_17_eth
+    internal: true
+  - id: vogsphere_pc_wifi_state
+    platform: homeassistant
+    entity_id: device_tracker.vogsphere_l340_17_wifi
+    internal: true
+  - id: vogsphere_pc_lan_ip
+    platform: homeassistant
+    entity_id: device_tracker.vogsphere_l340_17_eth
+    attribute: ip
+    internal: true
+  - id: vogsphere_pc_wifi_ip
+    platform: homeassistant
+    entity_id: device_tracker.vogsphere_l340_17_wifi
+    attribute: ip
+    internal: true
+
+binary_sensor:
+  - id: vogsphere_pc_state
+    platform: template
+    internal: true
+    lambda: |-
+      return id(vogsphere_pc_lan_state)->state == "home"
+        || id(vogsphere_pc_wifi_state)->state == "home";
+
+time:
+  - id: !extend sntp_time
+    on_time:
+      # Lower the backlight at night.
+      - hours: 00
+        then:
+          - light.turn_on: 
+              id: backlight
+              brightness: 20%
+      - hours: 08
+        then:
+          - light.turn_on:
+              id: backlight
+              brightness: 100%
+
+wifi:
+  on_connect:
+    - script.execute: prepare_wol
+
+script:
+  - id: prepare_wol
+    mode: single
+    then:
+      lambda: wol_setup();
+  - id: send_wol_packet
+    mode: single
+    then:
+      lambda: wol_send("${vogsphere_pc_mac_addr}");
+
+color:
+  - id: text_wol_color
+    red: 30%
+    green: 30%
+    blue: 30%
+  - id: text_clock_color
+    green_int: 53
+    blue_int: 31
+  - id: watchface_fg_color
+    blue: 10%
+    green: 10%
+  - id: time_marks_color
+    red_int: 255
+    green_int: 44
+  - id: time_text_color
+    red_int: 137
+    green_int: 61
+    blue_int: 25
+  - id: off_icon_color
+    red_int: 137
+    green_int: 61
+    blue_int: 25
+  - id: on_icon_color
+    green_int: 98
+
+font:
+  - file: 'gfonts://Roboto'
+    id: font_16
+    size: 16
+  - file: ESP32-C3-LCD/BebasNeue-Regular.ttf
+    id: clock_font
+    size: 45
+    glyphs: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', '-', ' ', '%']
+
+image:
+  - id: wifi_icon
+    file: mdi:wifi
+    resize: 16x16
+  - id: pc_icon
+    file: mdi:laptop
+    resize: 16x16
+
+interval:
+  - interval: 1sec
+    then:
+      - if:
+          condition:
+            - display.is_displaying_page: clock_page
+          then:
+            - component.update: watchface
+
+display:
+  # - platform: ili9xxx
+  #   model: gc9a01
+# Above is for when or if this is merged into the ili9xxx platform
+  - platform: gc9a01
+    id: watchface
+    cs_pin: GPIO10
+    dc_pin: GPIO2
+    width: 240
+    height: 240
+    eight_bit_color: false
+    rotation: 270
+    update_interval: never
+    pages:
+      - id: clock_page
+        lambda: |-
+          Color t_marks_color = id(time_marks_color);
+          Color t_text_color = id(time_text_color);
+          Clock::draw_watch_face(&it, 120, 120, 111, 100, id(sntp_time).now(),
+            id(watchface_fg_color), t_marks_color, t_marks_color, t_marks_color);
+          bool is_pc_on = id(vogsphere_pc_state)->state;
+          it.image(100, 40, id(pc_icon), is_pc_on ? id(on_icon_color) : id(off_icon_color));
+          bool is_connected = id(is_wifi_connected) && id(sntp_time).now().is_valid();
+          it.image(124, 40, id(wifi_icon), is_connected ? id(on_icon_color) : id(off_icon_color));
+          it.strftime(120, 85, id(font_16), t_text_color, TextAlign::CENTER, is_connected ? "%A %b %d" : " ", id(sntp_time).now());
+          it.strftime(120, 120, id(clock_font), t_text_color, TextAlign::CENTER, is_connected ? "%H:%M" : "--:--", id(sntp_time).now());
+          bool is_sending_wol = id(send_wol_packet).is_running();
+          if (is_pc_on) {
+            std::string lan_ip = id(vogsphere_pc_lan_ip)->state;
+            std::string wifi_ip = id(vogsphere_pc_wifi_ip)->state;
+            it.printf(120, 150, id(font_16), id(text_wol_color), TextAlign::CENTER, "LAN: %s", lan_ip == "" ? "Not available" : lan_ip.c_str());
+            it.printf(120, 170, id(font_16), id(text_wol_color), TextAlign::CENTER, "WiFi: %s", wifi_ip == "" ? "Not available" : wifi_ip.c_str());
+          } else {
+            it.print(120, 150, id(font_16), id(text_wol_color), TextAlign::CENTER, "Press to wake the PC");
+          }
+      - id: ota_page
+        lambda: |-
+          it.print(120, 85, id(font_16), id(time_text_color), TextAlign::CENTER, "OTA in progress");
+          it.printf(120, 120, id(clock_font), id(time_text_color), TextAlign::CENTER, "%d %%", id(ota_progress));
+
+touchscreen:
+  id: cst816d
+  platform: cst816
+  interrupt_pin: GPIO0
+  reset_pin: GPIO1
+  transform:
+    swap_xy: true
+    mirror_y: true    
+  on_touch:
+    - script.execute: send_wol_packet
+    - delay: 5s

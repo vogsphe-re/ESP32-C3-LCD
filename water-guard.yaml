@@ -1,0 +1,198 @@
+substitutions:
+  device_name: water-guard
+
+globals:
+  - id: valve_is_open
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  - id: test_mode
+    type: bool
+    restore_value: yes
+    initial_value: "false"
+
+external_components:
+  - source: github://dentra/esphome-components
+    components: [ 'miot', 'xiaomi_account', 'miot_sjws01lm' ]
+
+packages:
+  device_common: !include .device_common.yaml
+  relay_1: !include { file: water-guard/relay_template.yaml, vars: { r_id: relay_1, r_pin: GPIO21 } }
+  relay_2: !include { file: water-guard/relay_template.yaml, vars: { r_id: relay_2, r_pin: GPIO19 } }
+  relay_3: !include { file: water-guard/relay_template.yaml, vars: { r_id: relay_3, r_pin: GPIO18 } }
+  relay_4: !include { file: water-guard/relay_template.yaml, vars: { r_id: relay_4, r_pin: GPIO05 } }
+  boiler_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: boiler_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:1C:23"
+      ls_bindkey: "47b658e2288541239bb8ab4b79d75039"
+      ls_name: "Boiler Leak sensor"
+  filter_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: filter_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:29:F6"
+      ls_bindkey: "0daf32121dbdd402144b0cf33ea70557"
+      ls_name: "Filter Leak sensor"
+  shower_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: shower_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:28:CD"
+      ls_bindkey: "b92ab1569a921ec21ad8519bd7ffddf3"
+      ls_name: "Shower Leak sensor"
+  laundry_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: laundry_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:12:9A"
+      ls_bindkey: "593d53a13d86832fdf2b0fe7cab13ec9"
+      ls_name: "Laundry Leak sensor"
+  toilet_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: toilet_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:16:16"
+      ls_bindkey: "f925eb3dffc36fdb721ecd8f302f8bda"
+      ls_name: "Toilet Leak sensor"
+  kitchen_leak_sensor: !include
+    file: water-guard/leak_sensor_template.yaml
+    vars:
+      ls_id: kitchen_leak_sensor
+      ls_mac_addr: "54:EF:44:E5:18:4A"
+      ls_bindkey: "b2354449e4782b6d326858011afb0f12"
+      ls_name: "Kitchen Leak sensor"
+  # washstand_leak_sensor: !include
+  #   file: water-guard/leak_sensor_template.yaml
+  #   vars:
+  #     ls_id: washstand_leak_sensor
+  #     ls_mac_addr: "54:EF:44:E1:04:EE"
+  #     ls_bindkey: "a1d7c4308f00fe320ac87cdcad02d7e0"
+  #     ls_name: "Washstand Leak sensor"
+
+esphome:
+  name: ${device_name}
+  platform: ESP32
+  board: esp-wrover-kit
+
+http_request:
+  useragent: esphome/device
+  timeout: 10s
+
+status_led:
+  pin: GPIO25
+
+miot:
+  on_miot_advertise:
+    mac_address: "A4:C1:38:8A:67:22"
+    then:
+      lambda: //
+
+# CWX CR02 valve pinout:
+# Yellow (black) - common negative - relay_1 NO
+# Red (red) - open positive - relay_2 NO
+# Blue (white-blue) - close positive - relay_2 NC
+script:
+  # Open valve script.
+  - id: open_valve
+    mode: single
+    then:
+      - switch.turn_on: relay_1
+      - switch.turn_on: relay_2
+      - delay: 10000ms
+      - switch.turn_off: relay_1
+      - switch.turn_off: relay_2
+      - globals.set:
+          id: valve_is_open
+          value: "true"
+  # Close valve script.
+  - id: close_valve
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !id(test_mode);
+          then:
+            - switch.turn_on: relay_1
+            - switch.turn_off: relay_2
+            - delay: 10000ms
+            - switch.turn_off: relay_1
+            - globals.set:
+                id: valve_is_open
+                value: "false"
+  # Maintenance script: closes valve for a 10 seconds every monday at 15:00.
+  - id: run_maintenance
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(valve_is_open);
+          then:
+            - script.execute: close_valve
+            - delay: 10000ms
+            - script.execute: open_valve
+            - homeassistant.event:
+                event: esphome.valve_maintenance_executed
+  # Turn off the boiler when valve is closed for more than 25 seconds.
+  - id: turn_off_boiler
+    mode: single
+    then:
+      - delay: 25s
+      - if:
+          condition:
+            switch.is_off: water_valve
+          then:
+            - http_request.post: http://boiler-relay.local:4576/switch/boiler-relay_relay/turn_off
+
+time:
+  - id: !extend sntp_time
+    on_time:
+      # Maintenance timer: execute run_maintenance every monday at 15:00.
+      - days_of_week: MON
+        hours: 15
+        minutes: 00
+        seconds: 00
+        then:
+          - script.execute: run_maintenance
+
+switch:
+  # Valve switch
+  - platform: template
+    id: water_valve
+    name: "Water valve"
+    restore_mode: DISABLED
+    lambda: |-
+      return id(valve_is_open);
+    turn_on_action:
+      - script.execute: open_valve
+    turn_off_action:
+      - script.execute: close_valve
+    on_turn_on:
+      - script.stop: turn_off_boiler
+    on_turn_off:
+      - script.execute: turn_off_boiler
+  # Test mode switch
+  - platform: template
+    id: water_guard_test_mode
+    name: "Water guard test mode"
+    restore_mode: DISABLED
+    lambda: |-
+      return id(test_mode);
+    turn_on_action:
+      - globals.set:
+          id: test_mode
+          value: "true"
+    turn_off_action:
+      - globals.set:
+          id: test_mode
+          value: "false"
+
+button:
+  - platform: template
+    id: run_valve_maintenance
+    name: Run water valve maintenance
+    on_press:
+      - script.execute: run_maintenance
