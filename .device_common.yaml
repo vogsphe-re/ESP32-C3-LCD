@@ -2,7 +2,7 @@ logger:
 
 api:
   encryption:
-    key: !secret api_key
+    key: wBwQhpSW2ukOEZ5qLxG52x8njslxt8q03l7H9DYHCn4=
 
 ota:
   id: my_ota
